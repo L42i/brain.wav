@@ -1,21 +1,10 @@
 # sonification
 
-This  bla bla
-
-
-this instruction is for running the project on a Ubuntu studio (debian system)
-
-
-- what do we need?
-
-controller, ....
-
+This instruction is for running the project on a Ubuntu studio (debian system)
 
 ## Install and Setup
 
 In the desktop audio settings, use KT audio and select "pro audio"
-
-
 
 ### Python Setup
 
