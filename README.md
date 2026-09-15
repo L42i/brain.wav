@@ -1,105 +1,75 @@
-# sonification
+# brain.wav
 
-This  bla bla
-
-
-this instruction is for running the project on a Ubuntu studio (debian system)
-
-
-- what do we need?
-
-controller, ....
-
+This instruction is for running the project.
 
 ## Install and Setup
 
-In the desktop audio settings, use KT audio and select "pro audio"
-
-
-
 ### Python Setup
 
-Create and activate vit env:
+Create and activate virtual env:
 
-    $ python3 -m venv venv
+    $ python3 -m venv .venv
 
-    $ source venv/bin/activate
+    $ source .venv/bin/activate
 
 
-Install Depen:
+Install dependencies:
 
 
     $ pip install -r requirements.txt
 
 ### Chuck
 
+Linux:
+
     $ sudo apt install chuck
 
+MacOS:
 
+    $ brew install chuck
 
-### Reaper/ICST/IEM
+Windows:
 
+    $ https://chuck.stanford.edu
 
+### REAPER/ICST
 
+MacOS:
 
+    $ brew install reaper
+
+Windows and Linux:
+
+    $ https://reaper.fm
+
+ICST:
+
+    $ https://ambisonics.ch
+
+### Audio Loopback Driver (>= 53 channels)
+
+MacOS:
+
+    $ brew install --cask blackhole-64ch
+
+Windows:
+
+    $ ASIO Driver
+
+Linux:
+
+    $ JACK/Pipewire
 
 ## Running the Project
 
+1. Run REAPER with the ICST plugins 
 
-### qpwgraph
-
-activate the connection file:
-
-![](graphics/qpwgraph.png)    
-
-(needed for jack connection management)
+2. Run ChucK
 
 
+    $ cd synth && chuck -c53 --driver:JACK soundengine.ck # --driver:JACK on Linux 
 
-### Plugins
-
-
-From:    https://github.com/schweizerweb/icst-ambisonics-plugins/releases
+3. Run Python
 
 
-
-
-### Reaper
-
-1: Set channels to 64
-
-![alt text](graphics/reaper_channels.png)
-
-
-### Chuck 
-
-
-    $ cd synth
-
-    $ chuck -c53 --driver:JACK soundengine.ck 
-
-
-Output should be:
-
-        Loaded file: audio 1/a/high/raspy a high.wav 
-        Sample index: 0 
-        Total samples: 251752 
-        Actual sample rate: 48000.000000 
-        maxStartSample: 250552 
-        sampleVersion: 1 
-        OSC port: 8000
-
-### Studio-Specific
-
-(Couch 204)
-
-MIDAS:
-
-- set input to AES50A
-
-
-
-
-```
-
-```
+    $ cd ui && python3 main.py
