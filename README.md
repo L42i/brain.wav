@@ -62,12 +62,12 @@ Linux:
 
 ## Running the Project
 
-1. Run REAPER with the ICST plugins 
+1. Run REAPER `spatialization/main.RPP` with the ICST plugins 
 
 2. Run ChucK
 
 
-    $ cd synth && chuck -c53 --driver:JACK soundengine.ck # --driver:JACK on Linux 
+    $ cd synth && chuck -c53 --driver:JACK main.ck # --driver:JACK on Linux 
 
 3. Run Python
 
