@@ -3,7 +3,7 @@ import csv
 
 
 class Data:
-  def __init__(self, directory='data/', headers=None):
+  def __init__(self, directory='data/raw/', headers=None):
     self.directory = directory
     self.headers = headers
     self.files_data = {}
