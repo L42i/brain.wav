@@ -1,4 +1,5 @@
 import time
+import numpy as np
 from hid import HID
 from osc import OSC
 from loader import Data
@@ -45,6 +46,17 @@ try:
 
     pos[2] = max(-1, min(1, -state['axes'][2]))
 
+    # Converting Cartesian coordinates to Spherical coordinates
+    
+    x, y, z = pos[0], pos[1], pos[2]
+    r = np.sqrt(x**2 + y**2 + z**2)
+    # Spherical radius is set to 1
+
+    # Elevation and Azimuth calculation
+    theta = np.arcsin(z/r)
+    phi = np.arctan2(y, x)
+    r = 1
+    
     # pos => ICST
     icst.send(
       '/icst/ambi/group/xyz',
