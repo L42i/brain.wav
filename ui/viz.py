@@ -1,4 +1,5 @@
 import argparse
+from collections import OrderedDict
 import math
 import time
 import pygame
@@ -17,6 +18,8 @@ class InputBox:
     def __init__(self, rect, text, numeric=False):
         self.rect = pygame.Rect(rect)
         self.text, self.numeric, self.active = str(text), numeric, False
+        self._text_key = None
+        self._text_surface = None
     def event(self, e):
         if e.type == pygame.MOUSEBUTTONDOWN:
             self.active = self.rect.collidepoint(e.pos)
@@ -30,8 +33,11 @@ class InputBox:
     def draw(self, surface, font):
         pygame.draw.rect(surface, (15, 23, 40), self.rect, border_radius=5)
         pygame.draw.rect(surface, (115, 194, 255) if self.active else (71, 93, 130), self.rect, 2, border_radius=5)
-        txt = font.render(self.text, True, (234, 240, 250))
-        surface.blit(txt, (self.rect.x + 7, self.rect.y + 7))
+        key = (font, self.text)
+        if key != self._text_key:
+            self._text_surface = font.render(self.text, True, (234, 240, 250))
+            self._text_key = key
+        surface.blit(self._text_surface, (self.rect.x + 7, self.rect.y + 7))
 class Viz:
     def __init__(self, chuck=None, icst=None):
         pygame.display.init()
@@ -39,6 +45,11 @@ class Viz:
         self.base_size = (1400, 900)
         self.window = pygame.display.set_mode(self.base_size, pygame.RESIZABLE)
         self.screen = pygame.Surface(self.base_size).convert()
+        self._label_cache = OrderedDict()
+        self._brain_layer = pygame.Surface(self.base_size).convert()
+        self._orientation_overlay = pygame.Surface(self.base_size, pygame.SRCALPHA)
+        self._brain_camera = None
+        self._projection_angles = None
         self.viewport = pygame.Rect(0, 0, *self.base_size)
         self._resize_viewport()
         pygame.display.set_caption("Brain.wav | 3D Navigation")
@@ -81,6 +92,7 @@ class Viz:
         w = max(1, round(self.base_size[0] * scale))
         h = max(1, round(self.base_size[1] * scale))
         self.viewport = pygame.Rect((width - w) // 2, (height - h) // 2, w, h)
+        self._scaled_frame = pygame.Surface((w, h)).convert()
 
     def _virtual_pos(self, point):
         x = (point[0] - self.viewport.x) * self.base_size[0] / self.viewport.width
@@ -89,7 +101,11 @@ class Viz:
 
     def _display_frame(self):
         self.window.fill((7, 12, 24))
-        frame = pygame.transform.smoothscale(self.screen, self.viewport.size)
+        if self.viewport.size == self.base_size:
+            frame = self.screen
+        else:
+            pygame.transform.smoothscale(self.screen, self.viewport.size, self._scaled_frame)
+            frame = self._scaled_frame
         self.window.blit(frame, self.viewport.topleft)
         pygame.display.flip()
 
@@ -98,15 +114,28 @@ class Viz:
         self.datasets = (hc, sz)
     def project(self, xyz):
         x, y, z = xyz
-        cy, sy = math.cos(self.yaw), math.sin(self.yaw)
-        cp, sp = math.cos(self.pitch), math.sin(self.pitch)
+        angles = (self.yaw, self.pitch)
+        if angles != self._projection_angles:
+            self._projection_angles = angles
+            self._rotation = (math.cos(self.yaw), math.sin(self.yaw),
+                              math.cos(self.pitch), math.sin(self.pitch))
+        cy, sy, cp, sp = self._rotation
         xr, yr = cy*x - sy*y, sy*x + cy*y
         zr, depth = cp*z - sp*yr, sp*z + cp*yr
         perspective = 3.6 / max(1.0, 3.6 - depth)
         s = 285 * self.zoom * perspective
         return (int(575 + xr*s), int(390 - zr*s), perspective, depth)
     def label(self, text, x, y, color=(213, 223, 241), font=None):
-        self.screen.blit((font or self.small).render(str(text), True, color), (int(x), int(y)))
+        key = (font or self.small, str(text), tuple(color))
+        rendered = self._label_cache.get(key)
+        if rendered is None:
+            rendered = key[0].render(key[1], True, color)
+            self._label_cache[key] = rendered
+            if len(self._label_cache) > 256:
+                self._label_cache.popitem(last=False)
+        else:
+            self._label_cache.move_to_end(key)
+        self.screen.blit(rendered, (int(x), int(y)))
     def events(self):
         for original in pygame.event.get():
             if original.type == pygame.VIDEORESIZE:
@@ -178,7 +207,7 @@ class Viz:
                                  .82*math.sin(math.radians(t))))[:2] for t in range(-90, 91, 5)]
             pygame.draw.lines(self.screen, (38, 61, 95), False, pts, 1)
         for name, xyz in [("FRONT", (0, -1.15, 0)), ("BACK", (0, 1.15, 0)),
-                          ("RIGHT", (-1.15, 0, 0)), ("LEFT", (1.15, 0, 0)),
+                          ("LEFT", (-1.15, 0, 0)), ("RIGHT", (1.15, 0, 0)),
                           ("TOP", (0, 0, 1.13))]:
             x, y, _, _ = self.project(xyz)
             self.label(name, x-14, y-10, (150, 172, 198))
@@ -186,7 +215,8 @@ class Viz:
         pygame.draw.line(self.screen, (180, 195, 215), p1[:2], p2[:2], 3)
     def draw_orientation_features(self):
         """Schematic translucent nose and ears attached to rotating brain."""
-        overlay = pygame.Surface(self.base_size, pygame.SRCALPHA)
+        overlay = self._orientation_overlay
+        overlay.fill((0, 0, 0, 0))
         # A simple translucent triangle pointing toward the front (-Y).
         triangle = [(-.17, -.79, .02), (.17, -.79, .02), (0, -1.30, -.08)]
         points = [self.project(p)[:2] for p in triangle]
@@ -205,6 +235,23 @@ class Viz:
             pygame.draw.polygon(overlay, (192, 211, 231, 65), outline)
             pygame.draw.lines(overlay, (224, 235, 249, 150), True, outline, 2)
         self.screen.blit(overlay, (0, 0))
+
+    def draw_brain_layer(self):
+        """Rebuild fixed brain features only when the camera changes."""
+        camera = (self.yaw, self.pitch, self.zoom)
+        if camera != self._brain_camera:
+            screen = self.screen
+            self._brain_layer.fill((7, 12, 24))
+            self.screen = self._brain_layer
+            try:
+                self.label("Brain.wav  /  INTERACTIVE 3D NAVIGATION",
+                           40, 20, (236, 242, 255), self.title)
+                self.draw_brain()
+                self.draw_orientation_features()
+            finally:
+                self.screen = screen
+            self._brain_camera = camera
+        self.screen.blit(self._brain_layer, (0, 0))
 
     def draw_nodes(self, row, pos):
         objects = []
@@ -307,10 +354,7 @@ class Viz:
             return
         t = max(0.0, min(1.0, (float(time_axis)+1)/2))
         self.screen.fill((7, 12, 24))
-        self.label("Brain.wav  /  INTERACTIVE 3D NAVIGATION",
-                   40, 20, (236, 242, 255), self.title)
-        self.draw_brain()
-        self.draw_orientation_features()
+        self.draw_brain_layer()
         self.draw_nodes(row, pos)
         self.graph(row, t, is_hc)
         self.side_panel(pos, row, is_hc)
