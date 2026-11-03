@@ -1,9 +1,20 @@
+<<<<<<< HEAD
 # brain.wav
 
 This instruction is for running the project.
 
 ## Install and Setup
 
+=======
+# sonification
+
+This instruction is for running the project on a Ubuntu studio (debian system)
+
+## Install and Setup
+
+In the desktop audio settings, use KT audio and select "pro audio"
+
+>>>>>>> main
 ### Python Setup
 
 Create and activate virtual env:
