@@ -1,0 +1,117 @@
+import time
+import numpy as np
+from hid import HID
+from osc import OSC
+from loader import Data
+from viz import Viz
+
+stick = HID()
+chuck = OSC()
+icst = OSC(port=6668)
+data = Data()
+
+viz = Viz(chuck, icst)
+
+data.read_csv_files()
+
+hc = data.get_data('timecourses_hc.csv')
+sz = data.get_data('timecourses_sz.csv')
+
+scale = lambda x, x1, y1, x2, y2: x2 + (x - x1) * (y2 - x2) / (y1 - x1)
+
+pos = [0, 0, 0]
+
+fire = False
+is_hc = True
+
+try:
+  while True:
+    state = stick.get_state()
+
+    if state['buttons'][1] == 1 and not fire:
+      fire = True
+      is_hc = not is_hc
+
+    elif state['buttons'][1] == 0 and fire:
+      fire = False
+      chuck.send('/fire', 0)
+      print('control' if is_hc else 'schizophrenia')
+
+    # update pos
+    pos[0] += state['axes'][0] * 0.06
+    pos[0] = max(-1, min(1, pos[0]))
+
+    pos[1] -= state['axes'][1] * 0.06
+    pos[1] = max(-1, min(1, pos[1]))
+
+    pos[2] = max(-1, min(1, -state['axes'][2]))
+
+    # Converting Cartesian coordinates to Spherical coordinates
+    
+    x, y, z = pos[0], pos[1], pos[2]
+    r = np.sqrt(x**2 + y**2 + z**2)
+    # Spherical radius is set to 1
+
+    # Elevation and Azimuth calculation
+    theta = np.arcsin(z/r)
+    phi = np.arctan2(y, x)
+    r = 1
+    
+    # pos => ICST
+    icst.send(
+      '/icst/ambi/group/xyz',
+      ['Brain', pos[0], pos[1], pos[2], 1]
+    )
+
+    icst.send(
+      '/icst/ambi/group/setstretch',
+      ['Brain', 10 - 5 * (state['axes'][4] + 1)]
+    )
+
+    # row => ChucK
+    if is_hc:
+      row = hc[
+        int(
+          scale(
+            state['axes'][3],
+            -1,
+            1,
+            0,
+            len(hc)
+          )
+        )
+      ]
+
+    else:
+      row = sz[
+        int(
+          scale(
+            state['axes'][3],
+            -1,
+            1,
+            0,
+            len(sz)
+          )
+        )
+      ]
+
+    chuck.send('/row', row)
+
+    viz.update(
+      pos,
+      row,
+      state['axes'][3],
+      is_hc
+    )
+
+    if not viz.running:
+      break
+
+    time.sleep(0.05)  # 20 Hz
+
+except KeyboardInterrupt:
+  print("Exiting...")
+
+finally:
+  viz.close()
+  stick.close()
