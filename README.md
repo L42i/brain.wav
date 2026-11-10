@@ -29,19 +29,19 @@ Install dependencies:
 
     $ pip install -r requirements.txt
 
-### Chuck
+### SUPERCOLLIDER
 
+MacOS: 
+
+    https://github.com/supercollider/supercollider/releases/download/Version-3.14.1/SuperCollider-3.14.1-macOS-universal.dmg
+    
 Linux:
 
-    $ sudo apt install chuck
+    https://github.com/supercollider/supercollider/releases/download/Version-3.14.1/SuperCollider-3.14.1-Source.tar.bz2
 
-MacOS:
+Windows: 
 
-    $ brew install chuck
-
-Windows:
-
-    $ https://chuck.stanford.edu
+    https://github.com/supercollider/supercollider/releases/download/Version-3.14.1/SuperCollider-3.14.1_Release-x64-VS-426edf6.exe
 
 ### REAPER/ICST
 
@@ -75,12 +75,8 @@ Linux:
 
 1. Run REAPER `spatialization/main.RPP` with the ICST plugins 
 
-2. Run ChucK
-
-
-    $ cd synth && chuck -c53 --driver:JACK main.ck # --driver:JACK on Linux 
+2. Run SuperCollider
 
 3. Run Python
-
 
     $ cd ui && python3 main.py
