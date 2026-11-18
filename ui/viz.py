@@ -4,6 +4,8 @@ from pathlib import Path
 from collections import OrderedDict
 import math
 import time
+import socket
+import struct
 import pygame
 # Schematic 53-node layout. Replace positions and group assignments with
 # the actual NeuroMark component metadata for anatomical accuracy.
@@ -23,11 +25,42 @@ PATCH_INPUTS = [
 ]
 PATCH_OUTPUTS = [
     ("frequency", "Frequency"), ("amplitude", "Amplitude"),
-    ("grain_size", "Grain size"), ("grain_density", "Grain density"),
-    ("filter_cutoff", "Filter cutoff"), ("azimuth", "Azimuth"),
+    ("grainSize", "Grain size"), ("grainDensity", "Grain density"),
+    ("filterCutoff", "Filter cutoff"), ("azimuth", "Azimuth"),
     ("elevation", "Elevation"), ("distance", "Distance"),
     ("reverb", "Reverb send"),
 ]
+
+
+class OSCTransport:
+    """Minimal OSC-over-UDP sender (no third-party OSC dependency)."""
+
+    def __init__(self, host="127.0.0.1", port=57120):
+        self.set_destination(host, port)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def get_destination(self):
+        return self.host, self.port
+
+    def set_destination(self, host, port):
+        port = int(port)
+        if not host or not 1 <= port <= 65535:
+            raise ValueError("Invalid OSC destination")
+        self.host, self.port = host, port
+
+    @staticmethod
+    def _string(value):
+        raw = value.encode("utf-8") + b"\0"
+        return raw + b"\0" * ((-len(raw)) % 4)
+
+    def send_message(self, address, value):
+        if not address.startswith("/"):
+            raise ValueError("OSC address must begin with /")
+        packet = self._string(address) + self._string(",f") + struct.pack(">f", float(value))
+        self.socket.sendto(packet, (self.host, self.port))
+
+    def close(self):
+        self.socket.close()
 
 
 class InputBox:
@@ -64,8 +97,7 @@ class Viz:
         self._label_cache = OrderedDict()
         self._brain_layer = pygame.Surface(self.base_size).convert()
         self._orientation_overlay = pygame.Surface(self.base_size, pygame.SRCALPHA)
-        self._patch_layer = pygame.Surface(self.base_size, pygame.SRCALPHA)
-        self._patch_cache_key = None
+        self._patch_overlay = pygame.Surface((475, 820), pygame.SRCALPHA)
         self._brain_camera = None
         self._projection_angles = None
         self.viewport = pygame.Rect(0, 0, *self.base_size)
@@ -74,7 +106,9 @@ class Viz:
         self.font = pygame.font.SysFont("Arial", 19)
         self.small = pygame.font.SysFont("Arial", 15)
         self.title = pygame.font.SysFont("Arial", 25, bold=True)
-        self.supercollider, self.icst = supercollider, icst
+        self.supercollider = supercollider if supercollider is not None else OSCTransport()
+        self._owns_sc_transport = supercollider is None
+        self.icst = icst
         self.running, self.dragging = True, False
         self.mouse_virtual = (0, 0)
         self.yaw, self.pitch, self.zoom = -0.55, 0.3, 1.0
@@ -101,7 +135,7 @@ class Viz:
                 self.nodes.append(((.88 * r * math.cos(a) * depth,
                                     .73 * r * math.sin(a) * depth,
                                     .78 * z * depth), group))
-        cip, cp = supercollider.get_destination() if supercollider else ("127.0.0.1", 6667)
+        cip, cp = self.supercollider.get_destination()
         iip, ip = icst.get_destination() if icst else ("127.0.0.1", 6668)
         self.boxes = [
             InputBox((1140, 128, 205, 34), cip),
@@ -110,6 +144,10 @@ class Viz:
             InputBox((1140, 320, 92, 34), ip, True),
         ]
         self.buttons = [pygame.Rect(1240, 170, 105, 34), pygame.Rect(1240, 320, 105, 34)]
+        self.synth_id_box = InputBox((1535, 795, 65, 32), "1", True)
+        self._last_osc = {}
+        self.osc_interval = 1 / 30  # At most 30 sends/second per parameter.
+        self._last_osc_time = 0.0
     def _resize_viewport(self):
         width, height = self.window.get_size()
         scale = min(width / self.base_size[0], height / self.base_size[1])
@@ -124,6 +162,8 @@ class Viz:
         return (int(x), int(y))
 
     def _display_frame(self):
+        # Composite the patch bay LAST, after all navigator/graph rendering.
+        self.draw_patch_bay()
         self.window.fill((7, 12, 24))
         if self.viewport.size == self.base_size:
             frame = self.screen
@@ -179,7 +219,7 @@ class Viz:
                 e = pygame.event.Event(original.type, attrs)
             if e.type == pygame.QUIT:
                 self.running = False
-            for box in self.boxes:
+            for box in (*self.boxes, self.synth_id_box):
                 box.event(e)
             if e.type == pygame.MOUSEBUTTONDOWN:
                 if e.button == 1:
@@ -215,7 +255,7 @@ class Viz:
                 self.pitch = max(-1.4, min(1.4, self.pitch + e.rel[1] * .009))
             if e.type == pygame.MOUSEWHEEL:
                 self.zoom = max(.5, min(2.3, self.zoom * (1.1 ** e.y)))
-            if e.type == pygame.KEYDOWN and e.key == pygame.K_r and not any(b.active for b in self.boxes):
+            if e.type == pygame.KEYDOWN and e.key == pygame.K_r and not any(b.active for b in (*self.boxes, self.synth_id_box)):
                 self.yaw, self.pitch, self.zoom = -.55, .3, 1.0
     def draw_brain(self):
         # Ellipsoid wireframe: the same 3D geometry rotates with the camera.
@@ -409,12 +449,8 @@ class Viz:
         """Return normalized 0..1 values for the currently assigned outputs.
 
         This is a routing interface, not an OSC sender. Connect the returned
-        dictionary to the SuperCollider/ICST transport in the application controller.
+        dictionary to the SuperCollider OSC transport.
         """
-        if not self.patch_routes:
-            self.patch_values = {}
-            return {}
-
         def bipolar(value):
             return max(0.0, min(1.0, (float(value) + 1.0) / 2.0))
 
@@ -436,21 +472,34 @@ class Viz:
                              for output, source in self.patch_routes.items()}
         return self.patch_values.copy()
 
+    def send_patch_osc(self):
+        """Send normalized mapped values as /<synth_id>/<parameter> float."""
+        if not self.patch_values:
+            self._last_osc.clear()
+            return
+        try:
+            synth_id = int(self.synth_id_box.text)
+            if synth_id < 1:
+                raise ValueError("Synth ID must be positive")
+        except ValueError:
+            self.patch_message = "Invalid synth ID"
+            return
+        now = time.monotonic()
+        if now - self._last_osc_time < self.osc_interval:
+            return
+        self._last_osc_time = now
+        for parameter, value in self.patch_values.items():
+            address = f"/{synth_id}/{parameter}"
+            try:
+                # Resend periodically even when unchanged, to refresh receiver state.
+                self.supercollider.send_message(address, value)
+                self._last_osc[address] = value
+            except (OSError, ValueError, AttributeError) as exc:
+                self.patch_message = f"SuperCollider OSC error: {exc}"
+                break
+
     def draw_patch_bay(self):
         """Draw a compact input-column / audio-output-row routing matrix."""
-        key = (tuple(sorted(self.patch_routes.items())), self.patch_message)
-        if key != self._patch_cache_key:
-            screen = self.screen
-            self._patch_layer.fill((0, 0, 0, 0))
-            self.screen = self._patch_layer
-            try:
-                self._draw_patch_bay_contents()
-            finally:
-                self.screen = screen
-            self._patch_cache_key = key
-        self.screen.blit(self._patch_layer, (0, 0))
-
-    def _draw_patch_bay_contents(self):
         panel = pygame.Rect(1400, 25, 475, 820)
         pygame.draw.rect(self.screen, (15, 23, 37), panel, border_radius=12)
         pygame.draw.rect(self.screen, (51, 70, 96), panel, 1, border_radius=12)
@@ -482,7 +531,9 @@ class Viz:
             rect = pygame.Rect(x, 745, 126, 36)
             pygame.draw.rect(self.screen, (45, 66, 94), rect, border_radius=5)
             self.label(title, x + 40, 755)
-        self.label("Routes are normalized to 0-1; no OSC sent here", 1425, 802, (147, 167, 193))
+        self.label("Synth ID", 1425, 801, (147, 167, 193))
+        self.synth_id_box.draw(self.screen, self.small)
+        self.label("OSC: /id/parameter value", 1620, 801, (147, 167, 193))
 
     def update(self, pos, row=None, time_axis=0, is_hc=True, keyboard_test=False):
         self.events()
@@ -495,13 +546,15 @@ class Viz:
         self.graph(row, t, is_hc)
         self.side_panel(pos, row, is_hc)
         self.mapped_audio_values(pos, row, time_axis)
-        self.draw_patch_bay()
+        self.send_patch_osc()
         if keyboard_test:
             self.label("TEST | W/S front/back  A/D left/right  Q/E down/up", 55, 858, (196, 216, 235))
             self.label("J/L time  H dataset  Shift fast  Home reset  Esc quit", 55, 878, (196, 216, 235))
         self._display_frame()
     def close(self):
         self.running = False
+        if self._owns_sc_transport:
+            self.supercollider.close()
         pygame.display.quit()
 def run_keyboard_test():
     """Standalone keyboard-controlled demo; no joystick, OSC, or data files needed."""
@@ -519,7 +572,7 @@ def run_keyboard_test():
         # Update handles window close, mouse rotation, zoom and text boxes.
         # Don't use keyboard shortcuts while editing an OSC destination.
         keys = pygame.key.get_pressed()
-        if not any(box.active for box in viz.boxes):
+        if not any(box.active for box in (*viz.boxes, viz.synth_id_box)):
             speed = 0.65 * (2.0 if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT] else 1.0)
             position[0] += speed * dt * (int(keys[pygame.K_d]) - int(keys[pygame.K_a]))
             position[1] += speed * dt * (int(keys[pygame.K_s]) - int(keys[pygame.K_w]))
