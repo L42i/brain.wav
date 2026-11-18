@@ -1,4 +1,6 @@
 import argparse
+import json
+from pathlib import Path
 from collections import OrderedDict
 import math
 import time
@@ -14,6 +16,20 @@ GROUPS = [
     ("DM", "Default Mode", (175, 120, 242), 7),
     ("CB", "Cerebellar", (241, 128, 187), 4),
 ]  # 53 total; group sizes are illustrative until verified.
+# Patch-bay configuration. Change these lists as the sound engine evolves.
+PATCH_INPUTS = [
+    ("x", "X"), ("y", "Y"), ("z", "Z"), ("time", "Time"),
+    ("ic1", "IC 1"), ("ic2", "IC 2"), ("ic3", "IC 3"), ("mean", "Mean"),
+]
+PATCH_OUTPUTS = [
+    ("frequency", "Frequency"), ("amplitude", "Amplitude"),
+    ("grain_size", "Grain size"), ("grain_density", "Grain density"),
+    ("filter_cutoff", "Filter cutoff"), ("azimuth", "Azimuth"),
+    ("elevation", "Elevation"), ("distance", "Distance"),
+    ("reverb", "Reverb send"),
+]
+
+
 class InputBox:
     def __init__(self, rect, text, numeric=False):
         self.rect = pygame.Rect(rect)
@@ -39,15 +55,17 @@ class InputBox:
             self._text_key = key
         surface.blit(self._text_surface, (self.rect.x + 7, self.rect.y + 7))
 class Viz:
-    def __init__(self, chuck=None, icst=None):
+    def __init__(self, supercollider=None, icst=None):
         pygame.display.init()
         pygame.font.init()
-        self.base_size = (1400, 900)
+        self.base_size = (1900, 900)
         self.window = pygame.display.set_mode(self.base_size, pygame.RESIZABLE)
         self.screen = pygame.Surface(self.base_size).convert()
         self._label_cache = OrderedDict()
         self._brain_layer = pygame.Surface(self.base_size).convert()
         self._orientation_overlay = pygame.Surface(self.base_size, pygame.SRCALPHA)
+        self._patch_layer = pygame.Surface(self.base_size, pygame.SRCALPHA)
+        self._patch_cache_key = None
         self._brain_camera = None
         self._projection_angles = None
         self.viewport = pygame.Rect(0, 0, *self.base_size)
@@ -56,7 +74,7 @@ class Viz:
         self.font = pygame.font.SysFont("Arial", 19)
         self.small = pygame.font.SysFont("Arial", 15)
         self.title = pygame.font.SysFont("Arial", 25, bold=True)
-        self.chuck, self.icst = chuck, icst
+        self.supercollider, self.icst = supercollider, icst
         self.running, self.dragging = True, False
         self.mouse_virtual = (0, 0)
         self.yaw, self.pitch, self.zoom = -0.55, 0.3, 1.0
@@ -65,6 +83,12 @@ class Viz:
         self.selected_source = 0
         self.show_groups = [True] * 7
         self.status = "Drag brain to rotate | Scroll to zoom | R to reset"
+        self.patch_routes = {}  # output ID -> input ID; at most one per output
+        self.patch_values = {}  # latest normalized values for routed outputs
+        self.patch_file = Path(__file__).with_name("brainwav_patch.json")
+        self.patch_message = "Click a cell to assign an input"
+        self.patch_grid = pygame.Rect(1515, 195, 344, 9 * 49)
+        self.patch_cell_width = self.patch_grid.width / len(PATCH_INPUTS)
         self.nodes = []
         # Deterministic illustrative positions, arranged throughout an ellipsoid.
         for group, (_, _, _, count) in enumerate(GROUPS):
@@ -77,7 +101,7 @@ class Viz:
                 self.nodes.append(((.88 * r * math.cos(a) * depth,
                                     .73 * r * math.sin(a) * depth,
                                     .78 * z * depth), group))
-        cip, cp = chuck.get_destination() if chuck else ("127.0.0.1", 6667)
+        cip, cp = supercollider.get_destination() if supercollider else ("127.0.0.1", 6667)
         iip, ip = icst.get_destination() if icst else ("127.0.0.1", 6668)
         self.boxes = [
             InputBox((1140, 128, 205, 34), cip),
@@ -163,7 +187,7 @@ class Viz:
                         self.dragging = True
                     for i, rect in enumerate(self.buttons):
                         if rect.collidepoint(e.pos):
-                            target = (self.chuck, self.icst)[i]
+                            target = (self.supercollider, self.icst)[i]
                             try:
                                 host = self.boxes[2*i].text.strip()
                                 port = int(self.boxes[2*i+1].text)
@@ -171,7 +195,7 @@ class Viz:
                                     raise ValueError("Invalid host or port")
                                 if target:
                                     target.set_destination(host, port)
-                                    self.status = f"{'ChucK' if i == 0 else 'ICST'} destination updated"
+                                    self.status = f"{'SuperCollider' if i == 0 else 'ICST'} destination updated"
                                 else:
                                     self.status = "Demo mode: destination not connected"
                             except Exception as err:
@@ -179,6 +203,7 @@ class Viz:
                     for i in range(7):
                         if pygame.Rect(1010, 680+i*27, 320, 23).collidepoint(e.pos):
                             self.show_groups[i] = not self.show_groups[i]
+                    self.patch_click(e.pos)
                 if e.button == 4:
                     self.zoom = min(2.3, self.zoom * 1.1)
                 if e.button == 5:
@@ -326,7 +351,7 @@ class Viz:
     def side_panel(self, pos, row, is_hc):
         pygame.draw.rect(self.screen, (14, 22, 37), (992, 45, 380, 600), border_radius=10)
         self.label("OSC DESTINATIONS", 1015, 62, font=self.font)
-        self.label("ChucK IP", 1015, 135)
+        self.label("SuperCollider IP", 1015, 135)
         self.label("Port", 1015, 179)
         self.label("ICST IP", 1015, 285)
         self.label("Port", 1015, 329)
@@ -348,6 +373,117 @@ class Viz:
             pygame.draw.circle(self.screen, color if self.show_groups[i] else (75, 75, 85), (1021, y+9), 7)
             self.label(f"{short}  {name} ({count})", 1037, y,
                        (217, 226, 242) if self.show_groups[i] else (102, 114, 132))
+    def patch_click(self, point):
+        """Handle matrix toggles and preset buttons in virtual coordinates."""
+        x, y = point
+        if self.patch_grid.collidepoint(point):
+            column = min(len(PATCH_INPUTS) - 1, int((x - self.patch_grid.x) / self.patch_cell_width))
+            row = min(len(PATCH_OUTPUTS) - 1, int((y - self.patch_grid.y) / 49))
+            output, input_id = PATCH_OUTPUTS[row][0], PATCH_INPUTS[column][0]
+            if self.patch_routes.get(output) == input_id:
+                del self.patch_routes[output]
+            else:
+                self.patch_routes[output] = input_id
+            self.patch_message = f"{PATCH_OUTPUTS[row][1]}: {self.patch_routes.get(output, 'unmapped')}"
+        elif pygame.Rect(1450, 745, 126, 36).collidepoint(point):
+            try:
+                self.patch_file.write_text(json.dumps(self.patch_routes, indent=2))
+                self.patch_message = "Preset saved"
+            except OSError as exc:
+                self.patch_message = f"Save failed: {exc}"
+        elif pygame.Rect(1590, 745, 126, 36).collidepoint(point):
+            try:
+                loaded = json.loads(self.patch_file.read_text())
+                valid_inputs = {item[0] for item in PATCH_INPUTS}
+                valid_outputs = {item[0] for item in PATCH_OUTPUTS}
+                self.patch_routes = {k: v for k, v in loaded.items()
+                                     if k in valid_outputs and v in valid_inputs}
+                self.patch_message = "Preset loaded"
+            except (OSError, ValueError, AttributeError) as exc:
+                self.patch_message = f"Load failed: {exc}"
+        elif pygame.Rect(1730, 745, 126, 36).collidepoint(point):
+            self.patch_routes.clear()
+            self.patch_message = "Mappings cleared"
+
+    def mapped_audio_values(self, pos, row, time_axis):
+        """Return normalized 0..1 values for the currently assigned outputs.
+
+        This is a routing interface, not an OSC sender. Connect the returned
+        dictionary to the SuperCollider/ICST transport in the application controller.
+        """
+        if not self.patch_routes:
+            self.patch_values = {}
+            return {}
+
+        def bipolar(value):
+            return max(0.0, min(1.0, (float(value) + 1.0) / 2.0))
+
+        def component(index):
+            try:
+                return bipolar(row[index])
+            except (IndexError, TypeError, ValueError):
+                return 0.5
+
+        values = {"x": bipolar(pos[0]), "y": bipolar(pos[1]),
+                  "z": bipolar(pos[2]), "time": bipolar(time_axis),
+                  "ic1": component(0), "ic2": component(1),
+                  "ic3": component(2)}
+        try:
+            values["mean"] = bipolar(sum(float(v) for v in row) / len(row)) if len(row) else 0.5
+        except (TypeError, ValueError, ZeroDivisionError):
+            values["mean"] = 0.5
+        self.patch_values = {output: values[source]
+                             for output, source in self.patch_routes.items()}
+        return self.patch_values.copy()
+
+    def draw_patch_bay(self):
+        """Draw a compact input-column / audio-output-row routing matrix."""
+        key = (tuple(sorted(self.patch_routes.items())), self.patch_message)
+        if key != self._patch_cache_key:
+            screen = self.screen
+            self._patch_layer.fill((0, 0, 0, 0))
+            self.screen = self._patch_layer
+            try:
+                self._draw_patch_bay_contents()
+            finally:
+                self.screen = screen
+            self._patch_cache_key = key
+        self.screen.blit(self._patch_layer, (0, 0))
+
+    def _draw_patch_bay_contents(self):
+        panel = pygame.Rect(1400, 25, 475, 820)
+        pygame.draw.rect(self.screen, (15, 23, 37), panel, border_radius=12)
+        pygame.draw.rect(self.screen, (51, 70, 96), panel, 1, border_radius=12)
+        self.label("AUDIO PATCH BAY", 1425, 48, font=self.title)
+        self.label("Inputs across  /  Auditory outputs down", 1425, 88)
+        self.label("Click to map; click again to unmap", 1425, 111, (150, 172, 198))
+        self.label("One input per output; inputs can be reused", 1425, 134, (150, 172, 198))
+        for column, (_, name) in enumerate(PATCH_INPUTS):
+            x = self.patch_grid.x + int((column + 0.5) * self.patch_cell_width)
+            text = self.small.render(name, True, (159, 199, 244) if column < 4 else (244, 178, 121))
+            self.screen.blit(text, (x - text.get_width() // 2, 171))
+        for index, (output, name) in enumerate(PATCH_OUTPUTS):
+            y = self.patch_grid.y + index * 49
+            self.label(name, 1423, y + 15)
+            for column, (source, _) in enumerate(PATCH_INPUTS):
+                rect = pygame.Rect(round(self.patch_grid.x + column * self.patch_cell_width) + 3,
+                                   y + 4, round(self.patch_cell_width) - 6, 40)
+                active = self.patch_routes.get(output) == source
+                color = (59, 116, 178) if column < 4 else (168, 96, 49)
+                pygame.draw.rect(self.screen, color if active else (28, 39, 56), rect, border_radius=4)
+                pygame.draw.rect(self.screen, (77, 101, 133), rect, 1, border_radius=4)
+                if active:
+                    pygame.draw.circle(self.screen, (240, 247, 255), rect.center, 5)
+                else:
+                    pygame.draw.circle(self.screen, (72, 85, 103), rect.center, 2)
+        self.label(f"{len(self.patch_routes)} / {len(PATCH_OUTPUTS)} outputs mapped", 1425, 670)
+        self.label(self.patch_message[:52], 1425, 701, (150, 203, 173))
+        for x, title in [(1450, "Save"), (1590, "Load"), (1730, "Clear")]:
+            rect = pygame.Rect(x, 745, 126, 36)
+            pygame.draw.rect(self.screen, (45, 66, 94), rect, border_radius=5)
+            self.label(title, x + 40, 755)
+        self.label("Routes are normalized to 0-1; no OSC sent here", 1425, 802, (147, 167, 193))
+
     def update(self, pos, row=None, time_axis=0, is_hc=True, keyboard_test=False):
         self.events()
         if not self.running:
@@ -358,6 +494,8 @@ class Viz:
         self.draw_nodes(row, pos)
         self.graph(row, t, is_hc)
         self.side_panel(pos, row, is_hc)
+        self.mapped_audio_values(pos, row, time_axis)
+        self.draw_patch_bay()
         if keyboard_test:
             self.label("TEST | W/S front/back  A/D left/right  Q/E down/up", 55, 858, (196, 216, 235))
             self.label("J/L time  H dataset  Shift fast  Home reset  Esc quit", 55, 878, (196, 216, 235))

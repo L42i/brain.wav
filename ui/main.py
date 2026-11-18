@@ -1,23 +1,20 @@
 import time
-import numpy as np
 from hid import HID
 from osc import OSC
 from loader import Data
 from viz import Viz
 
 stick = HID()
-chuck = OSC()
+supercollider = OSC()
 icst = OSC(port=6668)
 data = Data()
 
-viz = Viz(chuck, icst)
+viz = Viz(supercollider, icst)
 
 data.read_csv_files()
 
 hc = data.get_data('timecourses_hc.csv')
 sz = data.get_data('timecourses_sz.csv')
-
-scale = lambda x, x1, y1, x2, y2: x2 + (x - x1) * (y2 - x2) / (y1 - x1)
 
 pos = [0, 0, 0]
 
@@ -34,7 +31,7 @@ try:
 
     elif state['buttons'][1] == 0 and fire:
       fire = False
-      chuck.send('/fire', 0)
+      supercollider.send('/fire', 0)
       print('control' if is_hc else 'schizophrenia')
 
     # update pos
@@ -46,17 +43,6 @@ try:
 
     pos[2] = max(-1, min(1, -state['axes'][2]))
 
-    # Converting Cartesian coordinates to Spherical coordinates
-    
-    x, y, z = pos[0], pos[1], pos[2]
-    r = np.sqrt(x**2 + y**2 + z**2)
-    # Spherical radius is set to 1
-
-    # Elevation and Azimuth calculation
-    theta = np.arcsin(z/r)
-    phi = np.arctan2(y, x)
-    r = 1
-    
     # pos => ICST
     icst.send(
       '/icst/ambi/group/xyz',
@@ -68,34 +54,13 @@ try:
       ['Brain', 10 - 5 * (state['axes'][4] + 1)]
     )
 
-    # row => ChucK
-    if is_hc:
-      row = hc[
-        int(
-          scale(
-            state['axes'][3],
-            -1,
-            1,
-            0,
-            len(hc)
-          )
-        )
-      ]
+    # row => SuperCollider
+    dataset = hc if is_hc else sz
+    row_index = max(0, min(len(dataset) - 1,
+                           int((state['axes'][3] + 1) * len(dataset) / 2)))
+    row = dataset[row_index]
 
-    else:
-      row = sz[
-        int(
-          scale(
-            state['axes'][3],
-            -1,
-            1,
-            0,
-            len(sz)
-          )
-        )
-      ]
-
-    chuck.send('/row', row)
+    supercollider.send('/row', row)
 
     viz.update(
       pos,

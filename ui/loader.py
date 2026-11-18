@@ -1,10 +1,11 @@
 import os
 import csv
+from pathlib import Path
 
 
 class Data:
-  def __init__(self, directory='data/raw/', headers=None):
-    self.directory = directory
+  def __init__(self, directory=None, headers=None):
+    self.directory = directory if directory is not None else Path(__file__).resolve().parent.parent / 'data' / 'raw'
     self.headers = headers
     self.files_data = {}
 
